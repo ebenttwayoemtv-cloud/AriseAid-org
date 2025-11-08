@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AriseAid International - Humanitarian Aid</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <!-- Load Firebase/Firestore -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, addDoc, serverTimestamp, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+
+        // IMPORTANT: Set debug logging for development
+        setLogLevel('Debug');
+        
+        // --- GLOBAL VARIABLES & INITIALIZATION ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-ariseaid-app';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db, auth;
+        let userId = null;
+        let isAuthReady = false;
+
+        if (firebaseConfig) {
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            
+            // --- Authentication and User ID Setup ---
+            onAuthStateChanged(auth, async (user) => {
+                if (!user) {
+                    // Sign in using custom token or anonymously if token is unavailable
+                    try {
+                        if (initialAuthToken) {
+                            const userCredential = await signInWithCustomToken(auth, initialAuthToken);
+                            userId = userCredential.user.uid;
+                        } else {
+                            const userCredential = await signInAnonymously(auth);
+                            userId = userCredential.user.uid;
+                        }
+                    } catch (error) {
+                        console.error("Firebase Auth failed:", error);
+                        // Fallback to a random ID if auth fails completely
+                        userId = crypto.randomUUID();
+                    }
+                } else {
+                    userId = user.uid;
+                }
+                isAuthReady = true;
+                console.log(`Auth Ready. Current User ID: ${userId}`);
+                
+                // Once authenticated, start listening for data
+                if (userId) {
+                    setupRealtimeListeners();
+                }
+            });
+        } else {
+            console.error("Firebase configuration is missing. Data features will not work.");
+        }
+
+        // --- Utility Functions ---
+
+        // Function to create path for public data
+        function getPublicDataPath(collectionName) {
+            return `artifacts/${appId}/public/data/${collectionName}`;
+        }
+        
+        // Function for custom alert messages (replacing native alert/confirm)
+        function showMessage(message, type = 'success') {
+            const messageBox = document.getElementById('global-message-box');
+            const messageText = document.getElementById('message-text');
+
+            if (!messageBox || !messageText) return;
+
+            messageText.textContent = message;
+            
+            // Reset colors
+            messageBox.className = 'fixed bottom-4 right-4 p-4 rounded-lg shadow-2xl transition-all duration-300 transform translate-y-full';
+
+            // Set colors based on type
+            let baseClass = 'fixed bottom-4 right-4 p-4 rounded-lg shadow-2xl transition-all duration-300 transform translate-y-0 ';
+            if (type === 'success') {
+                messageBox.className = baseClass + 'bg-teal-500 text-white';
+            } else if (type === 'error') {
+                messageBox.className = baseClass + 'bg-red-600 text-white';
+            } else {
+                 messageBox.className = baseClass + 'bg-blue-600 text-white';
+            }
+
+            // Auto-hide after 5 seconds
+            setTimeout(() => {
+                messageBox.classList.add('translate-y-full');
+            }, 5000);
+        }
+
+        // --- Real-time Firestore Listeners ---
+
+        function setupRealtimeListeners() {
+            if (!db) return;
+
+            // 1. Impact Statistics Listener
+            const statsPath = getPublicDataPath('site_stats');
+            const statsRef = doc(db, statsPath, 'current_stats');
+
+            onSnapshot(statsRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    document.getElementById('stat-lives').textContent = (data.lives || 0).toLocaleString();
+                    document.getElementById('stat-funds').textContent = (data.funds || 0).toLocaleString();
+                    document.getElementById('stat-volunteers').textContent = (data.volunteers || 0).toLocaleString();
+                    console.log("Impact Stats Updated:", data);
+                } else {
+                    console.log("No initial impact stats found. Initializing...");
+                    // Initialize with default values if it doesn't exist
+                    setDoc(statsRef, { lives: 12500, funds: 890000, volunteers: 450, lastUpdated: serverTimestamp() }, { merge: true });
+                }
+            }, (error) => {
+                console.error("Error fetching stats:", error);
+            });
+
+
+            // 2. Testimonials Listener
+            const testimonialsPath = getPublicDataPath('testimonials');
+            const testimonialsRef = collection(db, testimonialsPath);
+            const testimonialsQuery = query(testimonialsRef); // Fetching all for simplicity
+
+            onSnapshot(testimonialsQuery, (snapshot) => {
+                const testimonialsContainer = document.getElementById('testimonials-container');
+                testimonialsContainer.innerHTML = ''; // Clear existing testimonials
+                const testimonials = [];
+
+                snapshot.forEach(doc => {
+                    const data = doc.data();
+                    testimonials.push({ id: doc.id, ...data });
+                });
+                
+                // Sort by timestamp and take the latest 3
+                testimonials.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+                const latestTestimonials = testimonials.slice(0, 3);
+
+                if (latestTestimonials.length > 0) {
+                    latestTestimonials.forEach(testimonial => {
+                        const card = document.createElement('div');
+                        card.className = 'bg-white p-6 rounded-2xl premium-shadow hover-lift transition duration-300 flex flex-col';
+                        card.innerHTML = `
+                            <i data-lucide="quote" class="w-8 h-8 text-teal-500 mb-3"></i>
+                            <p class="text-gray-700 italic flex-grow">"${testimonial.message}"</p>
+                            <p class="mt-4 pt-4 border-t border-gray-100 text-sm font-semibold text-teal-600">— ${testimonial.author || 'Anonymous Beneficiary'}</p>
+                            <p class="text-xs text-gray-500 mt-1">${testimonial.city || 'Global'}</p>
+                        `;
+                        testimonialsContainer.appendChild(card);
+                    });
+                     // Re-render lucide icons after adding new HTML
+                    if (typeof lucide !== 'undefined') lucide.createIcons(); 
+                } else {
+                     testimonialsContainer.innerHTML = `<p class="text-center col-span-full text-gray-500 p-8 bg-gray-50 rounded-xl">No testimonials available yet. Be the first to submit one!</p>`;
+                }
+            }, (error) => {
+                console.error("Error fetching testimonials:", error);
+            });
+        }
+
+        // --- Form Submission Handlers ---
+        
+        // Handler for Contact Form Submission
+        window.handleContactSubmit = async (event) => {
+            event.preventDefault();
+            const form = event.target;
+            
+            // Simple validation
+            const name = form.name.value.trim();
+            const email = form.email.value.trim();
+            const message = form.message.value.trim();
+            
+            if (!name || !email || !message) {
+                showMessage("Please fill out all fields.", 'error');
+                return;
+            }
+
+            try {
+                // Submit to a 'contact_messages' collection
+                const contactsPath = getPublicDataPath('contact_messages');
+                await addDoc(collection(db, contactsPath), {
+                    name,
+                    email,
+                    message,
+                    timestamp: serverTimestamp(),
+                    status: 'new'
+                });
+                
+                showMessage("Thank you! Your message has been sent to the AriseAid team.", 'success');
+                form.reset();
+
+            } catch (error) {
+                console.error("Error submitting contact form:", error);
+                showMessage("Failed to send message. Please try again later.", 'error');
+            }
+        };
+
+        // Handler for Admin Testimonial Submission
+        window.handleTestimonialSubmit = async (event) => {
+            event.preventDefault();
+            if (!db) {
+                showMessage("Database connection failed. Cannot submit testimonial.", 'error');
+                return;
+            }
+
+            const form = event.target;
+            const author = form.t_author.value || 'Anonymous Beneficiary';
+            const message = form.t_message.value;
+            const city = form.t_city.value || 'Global';
+
+            if (!message) {
+                showMessage("Testimonial message cannot be empty.", 'error');
+                return;
+            }
+            
+            try {
+                const testimonialsPath = getPublicDataPath('testimonials');
+                await addDoc(collection(db, testimonialsPath), {
+                    author,
+                    message,
+                    city,
+                    timestamp: serverTimestamp()
+                });
+
+                showMessage("Testimonial submitted successfully!", 'success');
+                form.reset();
+            } catch (error) {
+                console.error("Error submitting testimonial:", error);
+                showMessage("Failed to submit testimonial.", 'error');
+            }
+        };
+        
+        // --- UI Interactions ---
+
+        // Smooth Scroll Function
+        window.smoothScroll = (targetId) => {
+            const target = document.querySelector(targetId);
+            if (target) {
+                window.scrollTo({
+                    top: target.offsetTop - (document.querySelector('header').offsetHeight || 0), // Adjust for fixed header
+                    behavior: 'smooth'
+                });
+            }
+        };
+
+        // Toggle Admin Panel Visibility
+        window.toggleAdminPanel = () => {
+            const panel = document.getElementById('admin-demo-panel');
+            panel.classList.toggle('hidden');
+            const toggleButton = document.getElementById('admin-toggle-btn');
+            if (panel.classList.contains('hidden')) {
+                toggleButton.textContent = 'Show Admin Demo Panel';
+            } else {
+                toggleButton.textContent = 'Hide Admin Demo Panel';
+            }
+        };
+
+        // Donation Modal Functions
+        window.openDonationModal = () => {
+            document.getElementById('donation-modal').classList.remove('opacity-0', 'pointer-events-none');
+            document.body.style.overflow = 'hidden'; // Prevent scrolling background
+        };
+
+        window.closeDonationModal = () => {
+            document.getElementById('donation-modal').classList.add('opacity-0', 'pointer-events-none');
+            document.body.style.overflow = '';
+        };
+
+        // Donation Program Selector
+        window.selectProgram = (programName, amount) => {
+            showMessage(`Initiating payment for ${programName} with a commitment of $${amount}. (This is the payment gateway placeholder.)`, 'info');
+            // In a real application, this would redirect to a payment processor (Stripe/PayPal)
+            closeDonationModal();
+        };
+
+        // --- Image Loading Placeholder (Base64 is required for this environment) ---
+        // Placeholder function to simulate image loading using Base64 data (as external URLs are blocked)
+        window.getMissionImageUrl = (key) => {
+            // NOTE: This uses an external service (placehold.co) which may be blocked in some environments. 
+            // In a real deployed site, replace these with your hosted image URLs.
+            const images = {
+                hero: 'https://placehold.co/1200x600/1e40af/ffffff?text=AriseAid+Global+Impact',
+                programs: 'https://placehold.co/800x400/0d9488/ffffff?text=Our+Core+Programs',
+                impact: 'https://placehold.co/1200x400/1e40af/ffffff?text=Where+We+Work',
+                team1: 'https://placehold.co/200x250/374151/ffffff?text=Leader+1',
+                team2: 'https://placehold.co/200x250/374151/ffffff?text=Leader+2',
+                team3: 'https://placehold.co/200x250/374151/ffffff?text=Leader+3',
+                partner1: 'https://placehold.co/150x70/f3f4f6/1e40af?text=Partner+A',
+                partner2: 'https://placehold.co/150x70/f3f4f6/0d9488?text=Partner+B',
+                partner3: 'https://placehold.co/150x70/f3f4f6/1e40af?text=Partner+C',
+            };
+            return images[key] || 'https://placehold.co/400x300/e5e7eb/374151?text=Image+Missing';
+        };
+
+        // Initial Icon Rendering on load
+        window.addEventListener('load', () => {
+            if (typeof lucide !== 'undefined') {
+                lucide.createIcons();
+            }
+        });
+    </script>
+
+    <style>
+        /* Custom Styles & Premium Aesthetics */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f4f8; /* Light background for professionalism */
+        }
+        .premium-shadow {
+            box-shadow: 0 10px 30px rgba(30, 64, 175, 0.1); /* Subtle blue shadow */
+        }
+        .hover-lift:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 15px 40px rgba(30, 64, 175, 0.2);
+        }
+        /* Custom scroll behavior for smooth navigation */
+        html {
+            scroll-behavior: smooth;
+        }
+        /* Gradient for Hero Section Overlay */
+        .hero-overlay {
+            background-image: linear-gradient(to top, rgba(30, 64, 175, 0.8), rgba(30, 64, 175, 0.5));
+        }
+    </style>
+</head>
+
+<body class="min-h-screen pt-16">
+
+    <!-- Global Message Box (Replaces alert() and confirm()) -->
+    <div id="global-message-box" class="fixed bottom-4 right-4 p-4 rounded-lg shadow-2xl transition-all duration-300 transform translate-y-full z-50">
+        <span id="message-text"></span>
+    </div>
+
+    <!-- Header / Navigation Bar -->
+    <header class="fixed top-0 left-0 w-full bg-white shadow-lg z-40">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between items-center h-16">
+                <!-- Logo -->
+                <a href="#" class="flex items-center space-x-2 text-2xl font-extrabold text-blue-800">
+                    <i data-lucide="heart" class="w-6 h-6 text-teal-600"></i>
+                    <span>AriseAid</span>
+                </a>
+
+                <!-- Navigation Links (Hidden on mobile) -->
+                <nav class="hidden md:flex space-x-6 text-gray-700 font-medium">
+                    <a href="#mission" onclick="smoothScroll('#mission')" class="hover:text-teal-600 transition">Mission</a>
+                    <a href="#programs" onclick="smoothScroll('#programs')" class="hover:text-teal-600 transition">Programs</a>
+                    <a href="#impact" onclick="smoothScroll('#impact')" class="hover:text-teal-600 transition">Impact</a>
+                    <a href="#team" onclick="smoothScroll('#team')" class="hover:text-teal-600 transition">Team</a>
+                    <a href="#contact" onclick="smoothScroll('#contact')" class="hover:text-teal-600 transition">Contact</a>
+                </nav>
+
+                <!-- Donate Button -->
+                <button onclick="openDonationModal()" class="px-4 py-2 text-sm font-semibold bg-teal-600 text-white rounded-full hover:bg-teal-700 transition duration-300 premium-shadow hover-lift hidden md:inline-block">
+                    Donate Now
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Donation Modal (Hidden by default) -->
+    <div id="donation-modal" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 transition-opacity duration-300 opacity-0 pointer-events-none p-4" onclick="closeDonationModal()">
+        <div class="bg-white rounded-2xl p-6 md:p-10 w-full max-w-2xl transform transition-transform duration-300 scale-95" onclick="event.stopPropagation()">
+            <div class="flex justify-between items-center border-b pb-4 mb-6">
+                <h2 class="text-3xl font-bold text-blue-800">Support a Program</h2>
+                <button onclick="closeDonationModal()" class="text-gray-500 hover:text-gray-800 transition">
+                    <i data-lucide="x" class="w-6 h-6"></i>
+                </button>
+            </div>
+
+            <p class="text-gray-700 mb-6">Your generosity directly funds these critical initiatives. Choose a program and a suggested amount to get started:</p>
+
+            <div class="space-y-4">
+                <!-- Program 1: Child Health & Education -->
+                <div class="p-4 bg-blue-50 rounded-xl flex justify-between items-center">
+                    <div class="flex items-center space-x-3">
+                        <i data-lucide="hand-heart" class="w-6 h-6 text-blue-600"></i>
+                        <span class="font-semibold text-gray-800">The Smile Foundation Project (Children)</span>
+                    </div>
+                    <button onclick="selectProgram('Smile Foundation', 100)" class="px-4 py-2 bg-blue-600 text-white rounded-full hover:bg-blue-700 text-sm font-medium">
+                        Donate $100
+                    </button>
+                </div>
+                 <!-- Program 2: Women Empowerment -->
+                 <div class="p-4 bg-teal-50 rounded-xl flex justify-between items-center">
+                    <div class="flex items-center space-x-3">
+                        <i data-lucide="user-check" class="w-6 h-6 text-teal-600"></i>
+                        <span class="font-semibold text-gray-800">WISE (Women's Economic Support)</span>
+                    </div>
+                    <button onclick="selectProgram('WISE', 250)" class="px-4 py-2 bg-teal-600 text-white rounded-full hover:bg-teal-700 text-sm font-medium">
+                        Donate $250
+                    </button>
+                </div>
+                 <!-- Program 3: Youth Skills -->
+                 <div class="p-4 bg-yellow-50 rounded-xl flex justify-between items-center">
+                    <div class="flex items-center space-x-3">
+                        <i data-lucide="trending-up" class="w-6 h-6 text-yellow-600"></i>
+                        <span class="font-semibold text-gray-800">YTSTEP (Youth Skills Training)</span>
+                    </div>
+                    <button onclick="selectProgram('YTSTEP', 50)" class="px-4 py-2 bg-yellow-600 text-white rounded-full hover:bg-yellow-700 text-sm font-medium">
+                        Donate $50
+                    </button>
+                </div>
+                
+            </div>
+            <p class="text-center text-sm text-gray-500 mt-6">All donations are tax-deductible to the full extent allowed by law.</p>
+        </div>
+    </div>
+    
+    <main class="space-y-20">
+
+        <!-- Hero Section -->
+        <section id="hero" class="relative overflow-hidden pt-0 h-[80vh] min-h-[500px]">
+            <!-- Background Image Placeholder -->
+            <div class="absolute inset-0 bg-blue-900 bg-cover bg-center" style="background-image: url('${window.getMissionImageUrl('hero')}');">
+                <div class="absolute inset-0 hero-overlay"></div>
+            </div>
+
+            <!-- Content -->
+            <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-full flex items-center justify-center text-center">
+                <div class="max-w-3xl text-white pt-20">
+                    <h1 class="text-4xl sm:text-6xl font-extrabold leading-tight mb-4 drop-shadow-lg">
+                        Empowering Communities. Building Futures.
+                    </h1>
+                    <p class="text-xl sm:text-2xl font-light mb-8">
+                        AriseAid International is committed to sustainable development through health, education, and economic support worldwide.
+                    </p>
+                    <div class="flex justify-center space-x-4">
+                        <button onclick="openDonationModal()" class="px-8 py-3 text-lg font-bold bg-teal-500 text-white rounded-full hover:bg-teal-600 transition duration-300 premium-shadow hover-lift">
+                            <span class="flex items-center"><i data-lucide="heart" class="w-5 h-5 mr-2"></i> Donate Today</span>
+                        </button>
+                        <a href="#programs" onclick="smoothScroll('#programs')" class="px-8 py-3 text-lg font-bold bg-white text-blue-800 rounded-full hover:bg-gray-100 transition duration-300 premium-shadow hover-lift">
+                            See Our Work
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Mission & Values Section -->
+        <section id="mission" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+            <h2 class="text-3xl font-bold text-center text-blue-800 mb-12">Our Core Mission & Values</h2>
+            
+            <div class="grid md:grid-cols-3 gap-8 text-center">
+                
+                <div class="p-6 bg-white rounded-2xl premium-shadow hover-lift transition duration-300">
+                    <i data-lucide="hand-heart" class="w-10 h-10 text-teal-600 mx-auto mb-4"></i>
+                    <h3 class="text-xl font-semibold text-gray-800 mb-3">Compassion</h3>
+                    <p class="text-gray-600">Driven by empathy, we serve the most vulnerable populations with dignity and respect.</p>
+                </div>
+
+                <div class="p-6 bg-white rounded-2xl premium-shadow hover-lift transition duration-300">
+                    <i data-lucide="lightbulb" class="w-10 h-10 text-teal-600 mx-auto mb-4"></i>
+                    <h3 class="text-xl font-semibold text-gray-800 mb-3">Sustainability</h3>
+                    <p class="text-gray-600">We invest in long-term solutions that empower communities to manage their own futures.</p>
+                </div>
+
+                <div class="p-6 bg-white rounded-2xl premium-shadow hover-lift transition duration-300">
+                    <i data-lucide="layers-3" class="w-10 h-10 text-teal-600 mx-auto mb-4"></i>
+                    <h3 class="text-xl font-semibold text-gray-800 mb-3">Transparency</h3>
+                    <p class="text-gray-600">We maintain open communication about our financials and the direct impact of every donation.</p>
+                </div>
+                
+            </div>
+        </section>
+
+        <!-- Programs Section -->
+        <section id="programs" class="bg-white py-16">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <h2 class="text-3xl font-bold text-center text-blue-800 mb-4">Our Core Initiatives</h2>
+                <p class="text-center text-gray-600 max-w-3xl mx-auto mb-12">AriseAid's mission is realized through six strategic, interconnected programs designed to foster lasting independence and happiness.</p>
+
+                <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
+                    
+                    <!-- Program 1: Health -->
+                    <div class="p-6 bg-blue-50 rounded-2xl premium-shadow hover-lift transition duration-300">
+                        <i data-lucide="hand-heart" class="w-8 h-8 text-blue-600 mb-3"></i>
+                        <h3 class="text-xl font-semibold text-gray-800 mb-2">The Smile Foundation Project</h3>
+                        <p class="text-gray-600 text-sm">Focused on providing food, healthcare, and essential life support for vulnerable children, widows, and the aged, ensuring their basic needs are met with dignity.</p>
+                    </div>
+
+                    <!-- Program 2: Economic Empowerment -->
+                    <div class="p-6 bg-blue-50 rounded-2xl premium-shadow hover-lift transition duration-300">
+                        <i data-lucide="user-check" class="w-8 h-8 text-blue-600 mb-3"></i>
+                        <h3 class="text-xl font-semibold text-gray-800 mb-2">WISE (Women Initiative for Success and Empowerment)</h3>
+                        <p class="text-gray-600 text-sm">Provides economic and livelihood support to women, empowering them to better manage their families, thereby reducing household pressure and increasing family happiness.</p>
+                    </div>
+
+                    <!-- Program 3: Skills Training -->
+                    <div class="p-6 bg-blue-50 rounded-2xl premium-shadow hover-lift transition duration-300">
+                        <i data-lucide="trending-up" class="w-8 h-8 text-blue-600 mb-3"></i>
+                        <h3 class="text-xl font-semibold text-gray-800 mb-2">YTSTEP (Youth Talent & Skills Training Empowerment Program)</h3>
+                        <p class="text-gray-600 text-sm">Targets youth by sponsoring them into formal skills training and talent development programs, paving the way for sustainable employment and future leadership.</p>
+                    </div>
+
+                    <!-- Program 4: Education -->
+                    <div class="p-6 bg-blue-50 rounded-2xl premium-shadow hover-lift transition duration-300">
+                        <i data-lucide="graduation-cap" class="w-8 h-8 text-blue-600 mb-3"></i>
+                        <h3 class="text-xl font-semibold text-gray-800 mb-2">Education Access Initiative</h3>
+                        <p class="text-gray-600 text-sm">Providing scholarships, school supplies, and infrastructure support to remote areas.</p>
+                    </div>
+
+                    <!-- Program 5: Water & Sanitation -->
+                    <div class="p-6 bg-blue-50 rounded-2xl premium-shadow hover-lift transition duration-300">
+                        <i data-lucide="droplet" class="w-8 h-8 text-blue-600 mb-3"></i>
+                        <h3 class="text-xl font-semibold text-gray-800 mb-2">Clean Water Projects</h3>
+                        <p class="text-gray-600 text-sm">Building new wells and sanitation facilities to ensure access to clean, safe drinking water for thousands.</p>
+                    </div>
+                    
+                    <!-- Program 6: Disaster Relief -->
+                    <div class="p-6 bg-blue-50 rounded-2xl premium-shadow hover-lift transition duration-300">
+                        <i data-lucide="shield-half" class="w-8 h-8 text-blue-600 mb-3"></i>
+                        <h3 class="text-xl font-semibold text-gray-800 mb-2">Emergency Response</h3>
+                        <p class="text-gray-600 text-sm">Immediate aid provision—food, shelter, and medical supplies—following natural disasters and conflicts.</p>
+                    </div>
+
+                </div>
+            </div>
+        </section>
+
+        <!-- Impact Section (Dynamic Data) -->
+        <section id="impact" class="relative py-20 overflow-hidden">
+             <!-- Background Image Placeholder for Visual Interest -->
+            <div class="absolute inset-0 bg-blue-900 bg-cover bg-center" style="background-image: url('${window.getMissionImageUrl('impact')}');">
+                <div class="absolute inset-0 bg-blue-900 opacity-80"></div>
+            </div>
+
+            <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-white">
+                <h2 class="text-3xl font-bold text-center mb-12">Our Impact in Numbers</h2>
+                
+                <div class="grid md:grid-cols-3 gap-10 text-center">
+                    
+                    <div class="p-6 border-b-4 border-teal-500 bg-black bg-opacity-20 rounded-xl premium-shadow">
+                        <p class="text-5xl font-extrabold" id="stat-lives">0</p>
+                        <p class="text-lg mt-2 font-light">Lives Positively Touched</p>
+                    </div>
+
+                    <div class="p-6 border-b-4 border-teal-500 bg-black bg-opacity-20 rounded-xl premium-shadow">
+                        <p class="text-5xl font-extrabold"><span class="text-2xl">$</span><span id="stat-funds">0</span>+</p>
+                        <p class="text-lg mt-2 font-light">Total Funds Raised</p>
+                    </div>
+
+                    <div class="p-6 border-b-4 border-teal-500 bg-black bg-opacity-20 rounded-xl premium-shadow">
+                        <p class="text-5xl font-extrabold" id="stat-volunteers">0</p>
+                        <p class="text-lg mt-2 font-light">Dedicated Volunteers</p>
+                    </div>
+                    
+                </div>
+                <p class="text-center mt-12 text-sm italic text-gray-300">These statistics are updated in real-time from our secure Firestore database, demonstrating our commitment to transparency.</p>
+            </div>
+        </section>
+
+        <!-- Team & Leadership Gallery -->
+        <section id="team" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
+            <h2 class="text-3xl font-bold text-center text-blue-800 mb-12">Meet Our Core Team</h2>
+            
+            <div class="grid md:grid-cols-3 gap-8 text-center">
+                
+                <!-- Team Member 1 -->
+                <div class="p-4 bg-white rounded-2xl premium-shadow hover-lift transition duration-300">
+                    <img src="${window.getMissionImageUrl('team1')}" alt="Team Leader 1" class="w-full h-auto rounded-xl mb-4 object-cover">
+                    <h3 class="text-xl font-semibold text-gray-800">John Doe</h3>
+                    <p class="text-teal-600 font-medium">Founder & CEO</p>
+                    <p class="text-sm text-gray-500 mt-2">Visionary leader driving global strategy and long-term partnerships.</p>
+                </div>
+
+                <!-- Team Member 2 -->
+                <div class="p-4 bg-white rounded-2xl premium-shadow hover-lift transition duration-300">
+                    <img src="${window.getMissionImageUrl('team2')}" alt="Team Leader 2" class="w-full h-auto rounded-xl mb-4 object-cover">
+                    <h3 class="text-xl font-semibold text-gray-800">Jane Smith</h3>
+                    <p class="text-teal-600 font-medium">Director of Programs</p>
+                    <p class="text-sm text-gray-500 mt-2">Oversees all six core initiatives and field operations across regions.</p>
+                </div>
+
+                <!-- Team Member 3 -->
+                <div class="p-4 bg-white rounded-2xl premium-shadow hover-lift transition duration-300">
+                    <img src="${window.getMissionImageUrl('team3')}" alt="Team Leader 3" class="w-full h-auto rounded-xl mb-4 object-cover">
+                    <h3 class="text-xl font-semibold text-gray-800">David Lee</h3>
+                    <p class="text-teal-600 font-medium">Head of Finance & Transparency</p>
+                    <p class="text-sm text-gray-500 mt-2">Ensures every donation is accounted for and maximized for impact.</p>
+                </div>
+                
+            </div>
+        </section>
+        
+        <!-- Partners Gallery -->
+        <section id="partners" class="bg-blue-50 py-16">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <h2 class="text-3xl font-bold text-center text-blue-800 mb-12">Our Valued Global Partners</h2>
+                
+                <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-6 justify-items-center items-center">
+                    <img src="${window.getMissionImageUrl('partner1')}" alt="Partner Logo A" class="h-16 w-auto opacity-70 hover:opacity-100 transition duration-300">
+                    <img src="${window.getMissionImageUrl('partner2')}" alt="Partner Logo B" class="h-16 w-auto opacity-70 hover:opacity-100 transition duration-300">
+                    <img src="${window.getMissionImageUrl('partner3')}" alt="Partner Logo C" class="h-16 w-auto opacity-70 hover:opacity-100 transition duration-300">
+                    <img src="${window.getMissionImageUrl('partner1')}" alt="Partner Logo D" class="h-16 w-auto opacity-70 hover:opacity-100 transition duration-300">
+                    <img src="${window.getMissionImageUrl('partner2')}" alt="Partner Logo E" class="h-16 w-auto opacity-70 hover:opacity-100 transition duration-300">
+                    <img src="${window.getMissionImageUrl('partner3')}" alt="Partner Logo F" class="h-16 w-auto opacity-70 hover:opacity-100 transition duration-300">
+                </div>
+            </div>
+        </section>
+
+        <!-- Testimonials/Reviews Gallery (Dynamic Data) -->
+        <section id="testimonials" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
+            <h2 class="text-3xl font-bold text-center text-blue-800 mb-12">Voices of Impact</h2>
+            <div id="testimonials-container" class="grid md:grid-cols-3 gap-8">
+                <!-- Testimonial cards are dynamically inserted here by JavaScript -->
+                <p class="text-center col-span-full text-gray-500 p-8 bg-gray-50 rounded-xl">Loading testimonials...</p>
+            </div>
+        </section>
+
+        <!-- Volunteer CTA Gallery -->
+        <section id="volunteers" class="bg-teal-600 py-16">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center text-white">
+                <h2 class="text-4xl font-extrabold mb-4">Join the Movement</h2>
+                <p class="text-xl font-light max-w-2xl mx-auto mb-8">Our volunteers are the backbone of AriseAid. Donate your time and skill to make a direct difference in someone's life.</p>
+                
+                <div class="flex justify-center space-x-4">
+                     <a href="mailto:volunteer@ariseaid.org" class="px-8 py-3 text-lg font-bold bg-white text-teal-600 rounded-full hover:bg-gray-100 transition duration-300 premium-shadow hover-lift">
+                        <span class="flex items-center"><i data-lucide="users" class="w-5 h-5 mr-2"></i> Become a Volunteer</span>
+                    </a>
+                    <button onclick="openDonationModal()" class="px-8 py-3 text-lg font-bold bg-blue-800 text-white rounded-full hover:bg-blue-900 transition duration-300 premium-shadow hover-lift">
+                        Support Our Work
+                    </button>
+                </div>
+
+                <div class="mt-10 grid grid-cols-3 md:grid-cols-6 gap-4 opacity-80">
+                    <i data-lucide="star" class="w-10 h-10 mx-auto"></i>
+                    <i data-lucide="trending-up" class="w-10 h-10 mx-auto"></i>
+                    <i data-lucide="user" class="w-10 h-10 mx-auto"></i>
+                    <i data-lucide="hand-heart" class="w-10 h-10 mx-auto"></i>
+                    <i data-lucide="gift" class="w-10 h-10 mx-auto"></i>
+                    <i data-lucide="map" class="w-10 h-10 mx-auto"></i>
+                </div>
+            </div>
+        </section>
+
+        <!-- Contact Form Section -->
+        <section id="contact" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
+            <h2 class="text-3xl font-bold text-center text-blue-800 mb-12">Get In Touch</h2>
+            
+            <div class="grid md:grid-cols-2 gap-12 items-start">
+                
+                <!-- Contact Form -->
+                <div class="p-8 bg-white rounded-2xl premium-shadow">
+                    <h3 class="text-2xl font-semibold text-gray-800 mb-6">Send Us a Message</h3>
+                    <form onsubmit="handleContactSubmit(event)" class="space-y-4">
+                        <div>
+                            <label for="name" class="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+                            <input type="text" id="name" name="name" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500">
+                        </div>
+                        <div>
+                            <label for="email" class="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
+                            <input type="email" id="email" name="email" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500">
+                        </div>
+                        <div>
+                            <label for="message" class="block text-sm font-medium text-gray-700 mb-1">Your Message</label>
+                            <textarea id="message" name="message" rows="4" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500"></textarea>
+                        </div>
+                        <button type="submit" class="w-full px-4 py-3 text-lg font-bold bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition duration-300 premium-shadow hover-lift">
+                            Submit Inquiry
+                        </button>
+                    </form>
+                </div>
+
+                <!-- Contact Info & Placeholder Map -->
+                <div>
+                    <h3 class="text-2xl font-semibold text-gray-800 mb-6">Our Global Office</h3>
+                    <div class="space-y-4 mb-8">
+                        <p class="flex items-start space-x-3 text-gray-700">
+                            <i data-lucide="map-pin" class="w-5 h-5 text-teal-600 flex-shrink-0 mt-1"></i>
+                            <span>123 Global Aid Way, Suite 400, New York, NY 10001, USA</span>
+                        </p>
+                        <p class="flex items-center space-x-3 text-gray-700">
+                            <i data-lucide="mail" class="w-5 h-5 text-teal-600 flex-shrink-0"></i>
+                            <a href="mailto:info@ariseaid.org" class="hover:text-teal-600 transition">info@ariseaid.org</a>
+                        </p>
+                        <p class="flex items-center space-x-3 text-gray-700">
+                            <i data-lucide="phone" class="w-5 h-5 text-teal-600 flex-shrink-0"></i>
+                            <span>+1 (555) 123-4567</span>
+                        </p>
+                    </div>
+                     <!-- Placeholder Map -->
+                    <div class="w-full h-64 bg-gray-200 rounded-2xl premium-shadow flex items-center justify-center">
+                        <p class="text-gray-500 font-medium">Global Office Map Placeholder</p>
+                    </div>
+                </div>
+
+            </div>
+        </section>
+        
+        <!-- Admin Demo Panel (Hidden by default) -->
+        <section id="admin-demo-panel" class="hidden bg-red-50 py-10">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <h2 class="text-2xl font-bold text-red-800 mb-6 border-b border-red-200 pb-2">Admin Demo: Submit New Testimonial</h2>
+                <p class="text-sm text-red-600 mb-4">This panel demonstrates the real-time Firestore functionality. Submitting this form will instantly update the "Voices of Impact" section above for all users.</p>
+                
+                <form onsubmit="handleTestimonialSubmit(event)" class="space-y-4 p-6 bg-white rounded-xl shadow-inner">
+                    <div class="grid md:grid-cols-3 gap-4">
+                        <div>
+                            <label for="t_author" class="block text-sm font-medium text-gray-700">Author</label>
+                            <input type="text" id="t_author" name="t_author" placeholder="John Doe" class="w-full p-2 border border-gray-300 rounded-lg">
+                        </div>
+                        <div>
+                            <label for="t_city" class="block text-sm font-medium text-gray-700">City/Region</label>
+                            <input type="text" id="t_city" name="t_city" placeholder="Prampram, Ghana" class="w-full p-2 border border-gray-300 rounded-lg">
+                        </div>
+                        <div>
+                            <label for="t_message" class="block text-sm font-medium text-gray-700">Message (Max 200 chars)</label>
+                            <input type="text" id="t_message" name="t_message" required maxlength="200" placeholder="AriseAid changed my family's life..." class="w-full p-2 border border-gray-300 rounded-lg">
+                        </div>
+                    </div>
+                    <button type="submit" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition">
+                        Submit Testimonial (Demo)
+                    </button>
+                </form>
+            </div>
+        </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-blue-800 text-white mt-16">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
+            <div class="grid md:grid-cols-4 gap-8 border-b border-blue-700 pb-8 mb-8">
+                
+                <!-- About -->
+                <div>
+                    <h4 class="text-xl font-semibold mb-4">AriseAid</h4>
+                    <p class="text-sm text-blue-200">Committed to empowering communities globally through sustainable, transparent aid programs.</p>
+                </div>
+
+                <!-- Quick Links -->
+                <div>
+                    <h4 class="text-xl font-semibold mb-4">Quick Links</h4>
+                    <ul class="space-y-2">
+                        <li><a href="#programs" onclick="smoothScroll('#programs')" class="text-blue-200 hover:text-teal-400 transition text-sm">Our Programs</a></li>
+                        <li><a href="#impact" onclick="smoothScroll('#impact')" class="text-blue-200 hover:text-teal-400 transition text-sm">Impact Report</a></li>
+                        <li><a href="#contact" onclick="smoothScroll('#contact')" class="text-blue-200 hover:text-teal-400 transition text-sm">Partner Inquiry</a></li>
+                        <li><a href="#" onclick="openDonationModal()" class="text-blue-200 hover:text-teal-400 transition text-sm">Ways to Give</a></li>
+                    </ul>
+                </div>
+
+                <!-- Contact -->
+                <div>
+                    <h4 class="text-xl font-semibold mb-4">Connect</h4>
+                    <p class="text-sm text-blue-200 mb-2">Email: <a href="mailto:info@ariseaid.org" class="hover:text-teal-400 transition">info@ariseaid.org</a></p>
+                    <p class="text-sm text-blue-200 mb-4">Phone: +1 (555) 123-4567</p>
+                </div>
+
+                <!-- Social & Admin -->
+                <div>
+                    <h4 class="text-xl font-semibold mb-4">Follow Us</h4>
+                    <div class="flex space-x-4 mb-4">
+                        <a href="https://www.facebook.com/profile.php?id=61567402434490" target="_blank" rel="noopener noreferrer" class="text-blue-200 hover:text-teal-400 transition">
+                            <i data-lucide="facebook" class="w-6 h-6"></i>
+                        </a>
+                        <a href="#" target="_blank" rel="noopener noreferrer" class="text-blue-200 hover:text-teal-400 transition">
+                            <i data-lucide="twitter" class="w-6 h-6"></i>
+                        </a>
+                        <a href="#" target="_blank" rel="noopener noreferrer" class="text-blue-200 hover:text-teal-400 transition">
+                            <i data-lucide="linkedin" class="w-6 h-6"></i>
+                        </a>
+                    </div>
+                    <!-- Admin Panel Toggle -->
+                    <button id="admin-toggle-btn" onclick="toggleAdminPanel()" class="text-xs text-blue-400 hover:text-teal-400 transition mt-4">
+                        Show Admin Demo Panel
+                    </button>
+                </div>
+            </div>
+
+            <!-- Copyright -->
+            <div class="text-center text-sm text-blue-400 pt-4">
+                &copy; 2025 AriseAid International. All rights reserved.
+            </div>
+        </div>
+    </footer>
+    
+    <!-- Script to ensure Lucide icons are rendered -->
+    <script>
+        window.addEventListener('load', () => {
+            if (typeof lucide !== 'undefined') {
+                lucide.createIcons();
+            }
+        });
+    </script>
+</body>
+</html>
+
